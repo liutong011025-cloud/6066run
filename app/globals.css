@@ -15,6 +15,7 @@ button, input { font: inherit; }
 .game-shell {
   width: 100vw;
   height: 100vh;
+  height: 100dvh;
   position: relative;
   overflow: hidden;
   background: #9fdcf1;
@@ -24,6 +25,8 @@ button, input { font: inherit; }
   width: 100%;
   height: 100%;
   display: block;
+  min-width: 0;
+  min-height: 0;
   image-rendering: pixelated;
   image-rendering: crisp-edges;
 }
@@ -44,6 +47,7 @@ button, input { font: inherit; }
   padding: 13px 18px 12px;
   text-align: center;
   z-index: 10;
+  overflow: hidden;
 }
 
 .question-kicker {
@@ -55,6 +59,7 @@ button, input { font: inherit; }
   letter-spacing: .08em;
   color: #356254;
   margin-bottom: 7px;
+  flex-wrap: wrap;
 }
 
 .question-text {
@@ -63,6 +68,7 @@ button, input { font: inherit; }
   line-height: 1.18;
   font-weight: 800;
   color: #173f35;
+  overflow-wrap: anywhere;
 }
 
 .controls {
@@ -90,10 +96,10 @@ button, input { font: inherit; }
   padding: 10px 12px;
 }
 .leaderboard h3 { margin: 0 0 7px; font-size: 13px; letter-spacing: .08em; }
-.rank-row { display: grid; grid-template-columns: 26px 1fr auto; gap: 7px; font-size: 11px; padding: 4px 0; border-top: 1px dashed rgba(22,63,53,.28); }
+.rank-row { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; gap: 7px; font-size: 11px; padding: 4px 0; border-top: 1px dashed rgba(22,63,53,.28); }
 .rank-row:first-of-type { border-top: 0; }
+.rank-row > span:nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rank-distance { font-weight: 800; color: #d96820; }
-.rank-local { font-size: 9px; opacity: .7; margin-top: 6px; }
 
 .lobby, .modal-backdrop {
   position: absolute;
@@ -103,20 +109,26 @@ button, input { font: inherit; }
   place-items: center;
   background: rgba(11, 48, 42, .24);
   backdrop-filter: blur(2px);
+  padding: 16px;
+  overflow: auto;
 }
 
 .lobby-card, .modal-card {
   width: min(560px, calc(100vw - 32px));
   padding: 24px;
   text-align: center;
+  max-height: 100%;
+  overflow: auto;
+  overflow-wrap: anywhere;
 }
 .lobby-card h1, .modal-card h2 { margin: 0 0 10px; font-size: clamp(26px, 5vw, 48px); letter-spacing: .04em; }
 .lobby-card p { margin: 7px auto 18px; max-width: 440px; line-height: 1.45; font-family: Arial, sans-serif; }
 .name-form { display: flex; gap: 9px; justify-content: center; flex-wrap: wrap; }
-.name-input { min-width: 230px; padding: 12px 14px; border: 4px solid #173f35; background: #fffdf4; outline: none; font-weight: 800; }
+.name-input { min-width: 0; width: 230px; max-width: 100%; padding: 12px 14px; border: 4px solid #173f35; background: #fffdf4; outline: none; font-weight: 800; }
 .pixel-button { border: 4px solid #173f35; padding: 11px 15px; background: var(--orange); color: #172f29; font-weight: 900; cursor: pointer; box-shadow: 5px 5px 0 rgba(20,54,47,.4); }
 .pixel-button:hover { transform: translate(1px,1px); box-shadow: 4px 4px 0 rgba(20,54,47,.4); }
 .pixel-button.secondary { background: #8dd9b6; }
+.pixel-button:focus-visible, .touch-button:focus-visible, .name-input:focus-visible { outline: 3px solid #146f8a; outline-offset: 3px; }
 .error-text { min-height: 18px; margin-top: 10px; color: #a92d22; font-size: 12px; font-weight: 800; }
 
 .modal-card { text-align: left; }
@@ -125,23 +137,76 @@ button, input { font: inherit; }
 .explanation { font-family: Arial, sans-serif; line-height: 1.45; font-size: 15px; }
 .modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; }
 
-.status-chip {
-  position: absolute;
-  top: 20px;
-  left: 18px;
-  z-index: 12;
-  padding: 8px 10px;
-  font-size: 11px;
-  font-weight: 900;
-  background: rgba(255,248,220,.9);
-  border: 3px solid #173f35;
+.mobile-controls { display: none; }
+
+@media (max-width: 720px), (pointer: coarse) and (max-height: 540px) {
+  .game-shell.in-run {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) clamp(104px, 28vw, 126px);
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    grid-template-areas: "question ranking" "scene scene" "actions actions";
+    gap: 6px;
+    padding: max(6px, env(safe-area-inset-top)) max(6px, env(safe-area-inset-right)) 0 max(6px, env(safe-area-inset-left));
+    background: var(--cream);
+  }
+  .in-run .game-canvas { grid-area: scene; overflow: hidden; }
+  .question-panel, .leaderboard {
+    position: static;
+    transform: none;
+    width: auto;
+    min-width: 0;
+    max-height: none;
+    margin: 0;
+    border-width: 3px;
+    box-shadow: 2px 2px 0 rgba(19,64,53,.28);
+    align-self: stretch;
+  }
+  .question-panel { grid-area: question; padding: 7px; }
+  .question-text { font-size: clamp(13px, 3.6vw, 18px); line-height: 1.2; }
+  .question-kicker { font-size: 8px; letter-spacing: 0; gap: 3px 8px; margin-bottom: 5px; }
+  .leaderboard { grid-area: ranking; padding: 6px 5px; overflow: hidden; }
+  .leaderboard h3 { font-size: 9px; letter-spacing: 0; margin-bottom: 4px; white-space: nowrap; }
+  .rank-row { grid-template-columns: 16px minmax(0,1fr) auto; gap: 3px; padding: 3px 0; font-size: 8px; }
+  .leaderboard .rank-row:nth-of-type(n+4) { display: none; }
+  .controls { display: none; }
+  .mobile-controls {
+    grid-area: actions;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 9px;
+    padding: 5px 3px max(10px, env(safe-area-inset-bottom));
+    touch-action: none;
+    user-select: none;
+  }
+  .touch-button {
+    min-width: 0;
+    min-height: 50px;
+    padding: 10px 4px;
+    border: 3px solid #173f35;
+    border-radius: 2px;
+    background: #8dd9b6;
+    box-shadow: 3px 3px 0 rgba(20,54,47,.4);
+    color: var(--ink);
+    font-size: 13px;
+    font-weight: 900;
+    cursor: pointer;
+    touch-action: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .touch-button:last-child { background: var(--orange); }
+  .touch-button:active:not(:disabled) { transform: translate(2px,2px); box-shadow: 1px 1px 0 rgba(20,54,47,.4); }
+  .touch-button:disabled { opacity: .5; cursor: default; }
+  .lobby-card, .modal-card { padding: 18px; }
 }
 
-@media (max-width: 720px) {
-  .question-panel { top: 10px; width: calc(100vw - 18px); padding: 10px 12px; }
-  .question-text { font-size: 18px; }
-  .question-kicker { font-size: 9px; gap: 10px; }
-  .leaderboard { right: 8px; bottom: 8px; width: 180px; max-height: 20vh; padding: 8px; }
-  .controls { left: 8px; bottom: 8px; font-size: 9px; max-width: 150px; }
-  .status-chip { top: auto; left: 8px; bottom: 92px; font-size: 9px; }
+@media (max-height: 480px) and (max-width: 720px), (pointer: coarse) and (max-height: 480px) {
+  .game-shell.in-run { gap: 4px; }
+  .question-panel { padding: 5px 7px; }
+  .question-text { font-size: 13px; }
+  .question-kicker { margin-bottom: 3px; }
+  .leaderboard { padding: 4px 5px; }
+  .rank-row { padding: 2px 0; }
+  .touch-button { min-height: 44px; padding: 6px 4px; font-size: 12px; }
+  .mobile-controls { padding-top: 2px; padding-bottom: max(6px, env(safe-area-inset-bottom)); }
 }
+
