@@ -1,12 +1,13 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { QUESTIONS, QuizQuestion } from "@/lib/questions";
 
 type Status = "lobby" | "playing" | "paused" | "failed" | "completed";
 type ObstacleType = "cone" | "crate" | "hurdle" | "planter" | "bench";
 type Obstacle = { lane: -1 | 0 | 1; z: number; type: ObstacleType; checked: boolean };
 type Rank = { nickname: string; best_distance: number; best_questions: number };
+type Sound = "start" | "jump" | "correct" | "fail" | "finish";
 
 type Runtime = {
   distance: number;
@@ -22,9 +23,13 @@ type Runtime = {
   lastSync: number;
 };
 
-const ROAD_SPEED = 0.17;
+const ROAD_SPEED = 0.095;
 const GATE_HIT_Z = 0.145;
-const LOW_OBSTACLES = new Set<ObstacleType>(["cone", "crate", "hurdle"]);
+const LOW_OBSTACLES = new Set<ObstacleType>(["cone", "crate", "hurdle", "bench"]);
+const SOUND_NOTES: Record<Sound, number[]> = {
+  start: [262, 330, 392, 523], jump: [294, 440, 660],
+  correct: [523, 659, 784], fail: [220, 165, 110], finish: [523, 659, 784, 1047, 784, 1047]
+};
 
 function shuffleForRun(): QuizQuestion[] {
   return [...QUESTIONS]
@@ -72,17 +77,43 @@ function updateLocalRank(nickname: string, distance: number, questions: number) 
   localStorage.setItem("ai-run-local-leaderboard", JSON.stringify(rows.slice(0, 20)));
 }
 
-function wrapCanvasText(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, maxWidth: number, lineHeight: number) {
-  const words = text.split(" ");
+function wrapCanvasText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
+  const words = text.trim().split(/\s+/u);
   let line = "";
   const lines: string[] = [];
   for (const word of words) {
     const test = line ? `${line} ${word}` : word;
-    if (ctx.measureText(test).width > maxWidth && line) { lines.push(line); line = word; }
-    else line = test;
+    if (ctx.measureText(test).width <= maxWidth) { line = test; continue; }
+    if (line) { lines.push(line); line = ""; }
+    // Break long tokens as well, including answers written without spaces.
+    for (const char of Array.from(word)) {
+      if (line && ctx.measureText(line + char).width > maxWidth) {
+        lines.push(line); line = char;
+      } else line += char;
+    }
   }
   if (line) lines.push(line);
-  lines.slice(0, 4).forEach((l, i) => ctx.fillText(l, x, y + i * lineHeight));
+  return lines;
+}
+
+function drawPanelAnswer(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, width: number, height: number, scale: number) {
+  const padding = Math.max(5, 7 * scale);
+  const innerWidth = Math.max(1, width - padding * 2);
+  const innerHeight = Math.max(1, height - padding * 2);
+  let fontSize = Math.max(10, 15 * scale);
+  let lines: string[] = [];
+  for (; fontSize >= 4; fontSize -= .5) {
+    ctx.font = `bold ${fontSize}px Arial`;
+    lines = wrapCanvasText(ctx, text, innerWidth);
+    if (lines.length * fontSize * 1.18 <= innerHeight) break;
+  }
+  const lineHeight = Math.min(fontSize * 1.18, innerHeight / Math.max(1, lines.length));
+  ctx.save();
+  ctx.beginPath(); ctx.rect(x + padding, y + padding, innerWidth, innerHeight); ctx.clip();
+  ctx.fillStyle = "#113f3b"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  const top = y + height / 2 - (lines.length - 1) * lineHeight / 2;
+  lines.forEach((line, i) => ctx.fillText(line, x + width / 2, top + i * lineHeight, innerWidth));
+  ctx.restore();
 }
 
 export default function Game() {
@@ -96,6 +127,7 @@ export default function Game() {
   const playerIdRef = useRef("");
   const runIdRef = useRef("");
   const dbConfiguredRef = useRef(false);
+  const audioRef = useRef<AudioContext | null>(null);
 
   const [status, setStatus] = useState<Status>("lobby");
   const [nickname, setNickname] = useState("");
@@ -103,11 +135,46 @@ export default function Game() {
   const [questionNo, setQuestionNo] = useState(1);
   const [distance, setDistance] = useState(0);
   const [ranks, setRanks] = useState<Rank[]>([]);
-  const [dbConfigured, setDbConfigured] = useState(false);
   const [joinError, setJoinError] = useState("");
   const [failure, setFailure] = useState<{ title: string; detail: string; q: QuizQuestion } | null>(null);
 
-  const correctAnswer = useMemo(() => question.correct === "left" ? question.left : question.right, [question]);
+  const unlockAudio = useCallback(() => {
+    try {
+      const AudioContextClass = window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioContextClass) return null;
+      if (!audioRef.current || audioRef.current.state === "closed") audioRef.current = new AudioContextClass();
+      if (audioRef.current.state === "suspended") void audioRef.current.resume().catch(() => {});
+      return audioRef.current;
+    } catch { return null; }
+  }, []);
+
+  const playSound = useCallback((sound: Sound) => {
+    // Audio is optional: an unavailable or blocked device must not interrupt a run.
+    try {
+      const audio = audioRef.current;
+      if (!audio || audio.state === "closed") return;
+      const step = sound === "fail" ? .12 : .075;
+      SOUND_NOTES[sound].forEach((frequency, i) => {
+        const oscillator = audio.createOscillator();
+        const gain = audio.createGain();
+        const start = audio.currentTime + i * step;
+        oscillator.type = "square";
+        oscillator.frequency.setValueAtTime(frequency, start);
+        gain.gain.setValueAtTime(0, start);
+        gain.gain.linearRampToValueAtTime(.035, start + .006);
+        gain.gain.exponentialRampToValueAtTime(.001, start + step * .9);
+        oscillator.connect(gain); gain.connect(audio.destination);
+        oscillator.onended = () => { oscillator.disconnect(); gain.disconnect(); };
+        oscillator.start(start); oscillator.stop(start + step);
+      });
+    } catch { /* Keep controls responsive when audio is unavailable. */ }
+  }, []);
+
+  useEffect(() => () => {
+    const audio = audioRef.current;
+    audioRef.current = null;
+    if (audio && audio.state !== "closed") void audio.close().catch(() => {});
+  }, []);
 
   const setGameStatus = useCallback((s: Status) => {
     statusRef.current = s;
@@ -137,9 +204,9 @@ export default function Game() {
       const res = await fetch("/api/leaderboard", { cache: "no-store" });
       const json = await res.json();
       if (json.configured) {
-        dbConfiguredRef.current = true; setDbConfigured(true); setRanks(json.rows || []);
+        dbConfiguredRef.current = true; setRanks(json.rows || []);
       } else {
-        dbConfiguredRef.current = false; setDbConfigured(false); setRanks(localRanks());
+        dbConfiguredRef.current = false; setRanks(localRanks());
       }
     } catch {
       setRanks(localRanks());
@@ -155,6 +222,7 @@ export default function Game() {
   const finishRun = useCallback(async (kind: "failed" | "completed", title: string, detail: string) => {
     const rt = runtimeRef.current;
     setGameStatus(kind === "completed" ? "completed" : "failed");
+    playSound(kind === "completed" ? "finish" : "fail");
     const q = rt.questions[Math.min(rt.questionIndex, rt.questions.length - 1)];
     setFailure({ title, detail, q });
     updateLocalRank(nicknameRef.current, rt.distance, rt.questionIndex);
@@ -165,9 +233,10 @@ export default function Game() {
       }).catch(() => {});
     }
     refreshRanks();
-  }, [refreshRanks, setGameStatus]);
+  }, [playSound, refreshRanks, setGameStatus]);
 
   const startFreshRun = useCallback(async () => {
+    unlockAudio();
     const questions = shuffleForRun();
     runtimeRef.current = {
       distance: 0, lane: 0, targetLane: 0, jumpY: 0, jumpV: 0, gateZ: 0.92,
@@ -187,7 +256,8 @@ export default function Game() {
     } else runIdRef.current = `local-run:${Date.now()}`;
 
     setGameStatus("playing");
-  }, [setGameStatus]);
+    playSound("start");
+  }, [playSound, setGameStatus, unlockAudio]);
 
   async function joinGame(e: FormEvent) {
     e.preventDefault();
@@ -196,6 +266,7 @@ export default function Game() {
     if (!/^[A-Za-z0-9 _-]{2,20}$/.test(clean)) {
       setJoinError("Use 2–20 letters, numbers, spaces, _ or -."); return;
     }
+    unlockAudio();
     nicknameRef.current = clean;
     try {
       const res = await fetch("/api/player", {
@@ -205,27 +276,40 @@ export default function Game() {
       if (!res.ok) throw new Error(json.error || "Could not join.");
       playerIdRef.current = json.playerId;
       dbConfiguredRef.current = Boolean(json.configured);
-      setDbConfigured(Boolean(json.configured));
     } catch (err) {
-      playerIdRef.current = `local:${clean}`; dbConfiguredRef.current = false; setDbConfigured(false);
+      playerIdRef.current = `local:${clean}`; dbConfiguredRef.current = false;
     }
     await startFreshRun();
   }
 
+  const move = useCallback((direction: -1 | 1) => {
+    if (statusRef.current !== "playing") return;
+    const rt = runtimeRef.current;
+    rt.targetLane = clamp(rt.targetLane + direction, -1, 1) as -1 | 0 | 1;
+  }, []);
+
+  const jump = useCallback(() => {
+    if (statusRef.current !== "playing") return;
+    const rt = runtimeRef.current;
+    if (rt.jumpY <= .001 && rt.jumpV <= 0) {
+      unlockAudio(); rt.jumpV = 3.3; playSound("jump");
+    }
+  }, [playSound, unlockAudio]);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.code === "Space") e.preventDefault();
-      const rt = runtimeRef.current;
+      if (e.target instanceof HTMLElement && (e.target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName))) return;
+      if (["Space", "ArrowLeft", "ArrowRight", "ArrowUp"].includes(e.code) && statusRef.current !== "lobby") e.preventDefault();
       if (statusRef.current === "playing") {
-        if (e.key === "ArrowLeft" || e.key.toLowerCase() === "a") rt.targetLane = Math.max(-1, rt.targetLane - 1) as -1 | 0 | 1;
-        if (e.key === "ArrowRight" || e.key.toLowerCase() === "d") rt.targetLane = Math.min(1, rt.targetLane + 1) as -1 | 0 | 1;
-        if ((e.code === "Space" || e.key === "ArrowUp") && rt.jumpY <= 0.001) rt.jumpV = 2.25;
+        if (e.key === "ArrowLeft" || e.key.toLowerCase() === "a") move(-1);
+        if (e.key === "ArrowRight" || e.key.toLowerCase() === "d") move(1);
+        if (e.code === "Space" || e.key === "ArrowUp") jump();
         if (e.key.toLowerCase() === "p") setGameStatus("paused");
       } else if (statusRef.current === "paused" && e.key.toLowerCase() === "p") setGameStatus("playing");
     };
     window.addEventListener("keydown", onKey, { passive: false });
     return () => window.removeEventListener("keydown", onKey);
-  }, [setGameStatus]);
+  }, [jump, move, setGameStatus]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -243,16 +327,20 @@ export default function Game() {
     }
     resize();
     window.addEventListener("resize", resize);
+    const resizeObserver = new ResizeObserver(resize);
+    resizeObserver.observe(canvas);
+
+    function horizonY(h: number) { return Math.min(h * .4, Math.max(70, h * .23)); }
 
     function laneX(lane: number, y: number, w: number, h: number) {
-      const horizon = Math.max(150, h * 0.23);
+      const horizon = horizonY(h);
       const t = clamp((y - horizon) / (h - horizon), 0, 1);
       const half = 64 + t * (w * 0.42 - 64);
       return w / 2 + lane * half * 0.55;
     }
 
     function roadY(z: number, h: number) {
-      const horizon = Math.max(150, h * 0.23);
+      const horizon = horizonY(h);
       return horizon + Math.pow(1 - clamp(z, 0, 1), 1.55) * (h - horizon);
     }
 
@@ -269,7 +357,7 @@ export default function Game() {
       ctx.fillStyle = "#7fb794";
       ctx.beginPath(); ctx.moveTo(0, h * .28); ctx.lineTo(w * .16, h * .15); ctx.lineTo(w * .31, h * .28); ctx.lineTo(w * .47, h * .14); ctx.lineTo(w * .62, h * .29); ctx.lineTo(w * .8, h * .17); ctx.lineTo(w, h * .29); ctx.lineTo(w, h * .39); ctx.lineTo(0, h * .39); ctx.fill();
       // campus blocks
-      const horizon = Math.max(150, h * .23);
+      const horizon = horizonY(h);
       drawPixelRect(w * .07, horizon - 60, w * .2, 78, "#efe1bd", "#356254", 4);
       drawPixelRect(w * .73, horizon - 72, w * .19, 90, "#f3e6c7", "#356254", 4);
       for (let i = 0; i < 5; i++) {
@@ -325,33 +413,37 @@ export default function Game() {
     function drawGate(q: QuizQuestion, z: number, w: number, h: number) {
       if (z > .72) return;
       const y = roadY(z, h); const scale = .28 + (1-z)*1.03; const center = w/2;
-      const roadHalf = Math.max(72, (y - Math.max(150,h*.23))/(h-Math.max(150,h*.23))*w*.38 + 62);
-      const panelW = Math.max(70, roadHalf*.78); const panelH = 80*scale;
-      const leftX = center - roadHalf*.55 - panelW/2; const rightX = center + roadHalf*.55 - panelW/2;
+      const roadHalf = Math.max(72, (y - horizonY(h))/(h-horizonY(h))*w*.38 + 62);
+      const panelW = Math.min(Math.max(70, roadHalf*.78), Math.max(30, (w - 28) / 2)); const panelH = 80*scale;
+      const offset = Math.min(roadHalf * .55, (w - panelW) / 2 - 6);
+      const leftX = center - offset - panelW/2; const rightX = center + offset - panelW/2;
       for (const [x,text] of [[leftX,q.left],[rightX,q.right]] as const) {
         ctx.fillStyle = "rgba(190,242,249,.58)"; ctx.fillRect(x, y-panelH, panelW, panelH);
         ctx.strokeStyle = "#e8ffff"; ctx.lineWidth = Math.max(2,4*scale); ctx.strokeRect(x, y-panelH, panelW, panelH);
-        ctx.strokeStyle = "rgba(77,145,154,.7)"; ctx.lineWidth = Math.max(1,2*scale); ctx.beginPath(); ctx.moveTo(x+6,y-panelH+6);ctx.lineTo(x+panelW-6,y-6);ctx.moveTo(x+panelW-12,y-panelH+8);ctx.lineTo(x+10,y-8);ctx.stroke();
-        ctx.fillStyle = "#113f3b"; ctx.font = `bold ${Math.max(10,12*scale)}px Arial`; ctx.textAlign="center"; ctx.textBaseline="middle";
-        wrapCanvasText(ctx, text, x+panelW/2, y-panelH/2-10*scale, panelW-16, Math.max(12,15*scale));
+        drawPanelAnswer(ctx, text, x, y-panelH, panelW, panelH, scale);
       }
       drawPixelRect(center-5*scale, y-panelH-18*scale, 10*scale, panelH+18*scale, "#315c52", "#23483f", Math.max(1,2*scale));
     }
 
     function drawRunner(rt: Runtime, w: number, h: number) {
-      const baseY = h*.82 - rt.jumpY*85; const x = laneX(rt.lane, h*.82, w, h); const bounce = statusRef.current === "playing" ? Math.sin(rt.distance*.8)*2 : 0;
+      const runnerScale = Math.min(1, w / 360, h / 330);
+      const groundY = h * .78;
+      const x = laneX(rt.lane, groundY, w, h);
+      ctx.save(); ctx.translate(x, groundY); ctx.scale(runnerScale, runnerScale);
+      const baseY = -rt.jumpY*85; const bounce = statusRef.current === "playing" ? Math.sin(rt.distance*.8)*2 : 0;
       // shadow
-      ctx.fillStyle="rgba(30,55,45,.22)";ctx.fillRect(x-18,h*.82+27,36,7);
+      ctx.fillStyle="rgba(30,55,45,.22)";ctx.fillRect(-18,27,36,7);
       // legs
-      drawPixelRect(x-12, baseY+18+bounce, 9, 22, "#284d70", "#14334e", 2); drawPixelRect(x+3, baseY+18-bounce, 9, 22, "#284d70", "#14334e", 2);
+      drawPixelRect(-12, baseY+18+bounce, 9, 22, "#284d70", "#14334e", 2); drawPixelRect(3, baseY+18-bounce, 9, 22, "#284d70", "#14334e", 2);
       // shoes
-      drawPixelRect(x-15, baseY+37+bounce, 13, 7, "#fff0c7", "#47392a", 2); drawPixelRect(x+2, baseY+37-bounce, 13, 7, "#fff0c7", "#47392a", 2);
+      drawPixelRect(-15, baseY+37+bounce, 13, 7, "#fff0c7", "#47392a", 2); drawPixelRect(2, baseY+37-bounce, 13, 7, "#fff0c7", "#47392a", 2);
       // body + backpack
-      drawPixelRect(x-18, baseY-12, 36, 34, "#f08b38", "#5a3b25", 3); drawPixelRect(x-24, baseY-8, 9, 25, "#1f7655", "#164a3b", 2);
+      drawPixelRect(-18, baseY-12, 36, 34, "#f08b38", "#5a3b25", 3); drawPixelRect(-24, baseY-8, 9, 25, "#1f7655", "#164a3b", 2);
       // head
-      drawPixelRect(x-14, baseY-38, 28, 27, "#d89c70", "#5a3b25", 3); drawPixelRect(x-16, baseY-43, 32, 9, "#2d4c3f", "#1a332c", 2);
+      drawPixelRect(-14, baseY-38, 28, 27, "#d89c70", "#5a3b25", 3); drawPixelRect(-16, baseY-43, 32, 9, "#2d4c3f", "#1a332c", 2);
       // arms
-      drawPixelRect(x-25, baseY-7+bounce, 8, 22, "#d89c70", "#5a3b25", 2); drawPixelRect(x+17, baseY-7-bounce, 8, 22, "#d89c70", "#5a3b25", 2);
+      drawPixelRect(-25, baseY-7+bounce, 8, 22, "#d89c70", "#5a3b25", 2); drawPixelRect(17, baseY-7-bounce, 8, 22, "#d89c70", "#5a3b25", 2);
+      ctx.restore();
     }
 
     function drawFrame() {
@@ -370,7 +462,7 @@ export default function Game() {
         rt.distance += dt * 9.4;
         rt.gateZ -= dt * ROAD_SPEED;
         rt.lane += (rt.targetLane - rt.lane) * Math.min(1, dt*10);
-        rt.jumpV -= dt * 5.3; rt.jumpY += rt.jumpV * dt;
+        rt.jumpV -= dt * 6.0; rt.jumpY += rt.jumpV * dt;
         if (rt.jumpY < 0) { rt.jumpY = 0; rt.jumpV = 0; }
         rt.obstacles.forEach(o => o.z -= dt*ROAD_SPEED);
 
@@ -399,6 +491,7 @@ export default function Game() {
               rt.distance += 20;
               finishRun("completed", "Course complete!", "You cleared all 40 AI knowledge gates.").catch(()=>{});
             } else {
+              playSound("correct");
               rt.gateZ = .92; rt.obstacles = makeObstacles();
               setQuestion(rt.questions[rt.questionIndex]); setQuestionNo(rt.questionIndex+1);
               syncProgress(true).catch(()=>{});
@@ -412,11 +505,11 @@ export default function Game() {
       raf = requestAnimationFrame(tick);
     }
     raf = requestAnimationFrame(tick);
-    return () => { cancelAnimationFrame(raf); window.removeEventListener("resize", resize); };
-  }, [finishRun, syncProgress]);
+    return () => { cancelAnimationFrame(raf); resizeObserver.disconnect(); window.removeEventListener("resize", resize); };
+  }, [finishRun, playSound, syncProgress]);
 
   return (
-    <main className="game-shell">
+    <main className={`game-shell${status !== "lobby" ? " in-run" : ""}`}>
       <canvas ref={canvasRef} className="game-canvas" aria-label="AI Knowledge Run game" />
 
       {status !== "lobby" && (
@@ -425,15 +518,18 @@ export default function Game() {
             <div className="question-kicker"><span>AI KNOWLEDGE GATE {questionNo}/40</span><span>{Math.floor(distance)} m</span></div>
             <div className="question-text">{question.prompt}</div>
           </section>
-          <div className="status-chip">{nicknameRef.current || nickname} · BEST RUN SAVES</div>
           <div className="controls">← / A &nbsp; MOVE LEFT<br/>→ / D &nbsp; MOVE RIGHT<br/>SPACE / ↑ &nbsp; JUMP<br/>P &nbsp; PAUSE</div>
           <aside className="leaderboard pixel-panel">
             <h3>LIVE RANKING</h3>
             {ranks.length === 0 ? <div className="rank-row"><span>—</span><span>No runs yet</span><span>0 m</span></div> : ranks.slice(0,8).map((r,i)=>(
               <div className="rank-row" key={`${r.nickname}-${i}`}><span>#{i+1}</span><span>{r.nickname}</span><span className="rank-distance">{Math.floor(r.best_distance)}m</span></div>
             ))}
-            {!dbConfigured && <div className="rank-local">LOCAL MODE · Add Supabase env vars for a shared ranking.</div>}
           </aside>
+          <div className="mobile-controls" role="group" aria-label="Run controls">
+            <button className="touch-button" type="button" disabled={status !== "playing"} onClick={() => move(-1)}>← LEFT</button>
+            <button className="touch-button" type="button" disabled={status !== "playing"} onClick={() => move(1)}>RIGHT →</button>
+            <button className="touch-button" type="button" disabled={status !== "playing"} onClick={jump}>↑ JUMP</button>
+          </div>
         </>
       )}
 
@@ -470,3 +566,4 @@ export default function Game() {
     </main>
   );
 }
+
